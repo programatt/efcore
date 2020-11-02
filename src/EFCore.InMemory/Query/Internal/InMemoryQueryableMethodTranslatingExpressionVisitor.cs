@@ -1406,23 +1406,39 @@ namespace Microsoft.EntityFrameworkCore.InMemory.Query.Internal
                             : foreignKey.Properties,
                         makeNullable);
 
-                    var keyComparison = Expression.Call(_objectEqualsMethodInfo, AddConvertToObject(outerKey), AddConvertToObject(innerKey));
+                    Expression predicate = null;
+                    if (AppContext.TryGetSwitch("Microsoft.EntityFrameworkCore.Issue23130", out var isEnabled) && isEnabled)
+                    {
+                        var outerKeyFirstProperty = outerKey is NewExpression newExpression
+                            ? ((UnaryExpression)((NewArrayExpression)newExpression.Arguments[0]).Expressions[0]).Operand
+                            : outerKey;
 
-                    var predicate = makeNullable
-                        ? Expression.AndAlso(
-                            outerKey is NewArrayExpression newArrayExpression
-                                ? newArrayExpression.Expressions
-                                    .Select(
-                                        e =>
-                                        {
-                                            var left = (e as UnaryExpression)?.Operand ?? e;
+                        predicate = outerKeyFirstProperty.Type.IsNullableType()
+                            ? Expression.AndAlso(
+                                Expression.NotEqual(outerKeyFirstProperty, Expression.Constant(null, outerKeyFirstProperty.Type)),
+                                Expression.Equal(outerKey, innerKey))
+                            : Expression.Equal(outerKey, innerKey);
+                    }
+                    else
+                    {
+                        var keyComparison = Expression.Call(_objectEqualsMethodInfo, AddConvertToObject(outerKey), AddConvertToObject(innerKey));
 
-                                            return Expression.NotEqual(left, Expression.Constant(null, left.Type));
-                                        })
-                                    .Aggregate((l, r) => Expression.AndAlso(l, r))
-                                : Expression.NotEqual(outerKey, Expression.Constant(null, outerKey.Type)),
-                            keyComparison)
-                        : (Expression)keyComparison;
+                        predicate = makeNullable
+                            ? Expression.AndAlso(
+                                outerKey is NewArrayExpression newArrayExpression
+                                    ? newArrayExpression.Expressions
+                                        .Select(
+                                            e =>
+                                            {
+                                                var left = (e as UnaryExpression)?.Operand ?? e;
+
+                                                return Expression.NotEqual(left, Expression.Constant(null, left.Type));
+                                            })
+                                        .Aggregate((l, r) => Expression.AndAlso(l, r))
+                                    : Expression.NotEqual(outerKey, Expression.Constant(null, outerKey.Type)),
+                                keyComparison)
+                            : (Expression)keyComparison;
+                    }
 
                     var correlationPredicate = _expressionTranslator.Translate(predicate);
                     innerQueryExpression.UpdateServerQueryExpression(
@@ -1472,6 +1488,7 @@ namespace Microsoft.EntityFrameworkCore.InMemory.Query.Internal
 
                 return innerShaper;
             }
+
             private static Expression AddConvertToObject(Expression expression)
                 => expression.Type.IsValueType
                     ? Expression.Convert(expression, typeof(object))
